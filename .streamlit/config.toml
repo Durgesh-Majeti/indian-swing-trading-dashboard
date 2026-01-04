@@ -1,0 +1,32 @@
+[server]
+# Enable CORS for mobile access
+enableCORS = true
+enableXsrfProtection = true
+
+[browser]
+# Automatically open browser (disabled for Streamlit Cloud)
+gatherUsageStats = false
+
+[theme]
+# Light theme optimized for mobile
+primaryColor = "#2196F3"
+backgroundColor = "#fafafa"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#212121"
+font = "sans serif"
+
+[ui]
+# Hide top menu and footer for cleaner mobile experience
+hideTopBar = false
+hideSidebarNav = false
+
+[client]
+# Show error details
+showErrorDetails = true
+
+# Performance optimizations
+[runner]
+# Fast reruns for better mobile experience
+fastReruns = true
+magicEnabled = true
+
