@@ -49,15 +49,28 @@ class FastDataEngine:
         
         if POSTGRES_AVAILABLE:
             try:
-                import streamlit as st
-                if hasattr(st, 'secrets') and st.secrets:
-                    db_secrets = st.secrets.get("database", {})
-                    self.postgres_url = db_secrets.get("postgres_url") or db_secrets.get("url")
-                    if self.postgres_url:
-                        self.use_postgres = True
-                        logger.info("PostgreSQL connection detected from Streamlit secrets. Using PostgreSQL for persistent storage.")
+                # Try to import streamlit - may not be available in all contexts
+                try:
+                    import streamlit as st
+                except ImportError:
+                    st = None
+                
+                if st is not None:
+                    try:
+                        # Access secrets safely - may not be available during import
+                        if hasattr(st, 'secrets'):
+                            secrets = getattr(st, 'secrets', None)
+                            if secrets is not None:
+                                db_secrets = secrets.get("database", {})
+                                if isinstance(db_secrets, dict):
+                                    self.postgres_url = db_secrets.get("postgres_url") or db_secrets.get("url")
+                                    if self.postgres_url:
+                                        self.use_postgres = True
+                                        logger.info("PostgreSQL connection detected from Streamlit secrets. Using PostgreSQL for persistent storage.")
+                    except (AttributeError, KeyError, TypeError) as e:
+                        logger.debug(f"Could not access Streamlit secrets: {e}. Using SQLite.")
             except Exception as e:
-                logger.debug(f"Could not access Streamlit secrets: {e}. Using SQLite.")
+                logger.debug(f"Error checking for PostgreSQL connection: {e}. Using SQLite.")
         
         self._init_database()
 
