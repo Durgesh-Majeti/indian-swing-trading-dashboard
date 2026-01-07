@@ -28,28 +28,10 @@ ATR_MULTIPLIER = 2.0  # For stop loss calculation (Low - 2 * ATR)
 RISK_REWARD_RATIO = 2.0  # Target is 2x the risk (1:2 ratio)
 MIN_LOOKBACK_DAYS = 250  # Minimum data required for 200 EMA
 
-# Strategy parameters
-GOLDEN_PULLBACK_RSI_THRESHOLD = 40
-GOLDEN_PULLBACK_EMA_FAST = 50
-GOLDEN_PULLBACK_EMA_SLOW = 200
-GOLDEN_PULLBACK_THRESHOLD_MIN = 0.02  # 2% pullback threshold (min)
-GOLDEN_PULLBACK_THRESHOLD_MAX = 0.05  # 5% pullback threshold (max)
-GOLDEN_PULLBACK_THRESHOLD_DEFAULT = 0.03  # 3% default
-
 # Calibration parameters
 MIN_OPPORTUNITIES_THRESHOLD = 5  # Auto-calibrate if fewer than 5 opportunities
 CALIBRATION_STEP = 0.005  # 0.5% increment per calibration attempt
 MAX_CALIBRATION_ATTEMPTS = 3
-
-BOLLINGER_PERIOD = 20
-BOLLINGER_STD = 2
-BOLLINGER_SQUEEZE_THRESHOLD = 0.1  # Bandwidth threshold for squeeze
-BOLLINGER_VOLUME_MULTIPLIER = 1.5  # Volume must be 1.5x average
-
-# SuperTrend parameters
-SUPERTREND_PERIOD = 10
-SUPERTREND_MULTIPLIER = 3.0
-SUPERTREND_MIN_ADX = 25  # Minimum ADX for SuperTrend Flow strategy
 
 # Dead Stock Filter parameters
 MIN_ADX_THRESHOLD = 20.0  # Minimum ADX to avoid sideways markets
@@ -139,10 +121,6 @@ STRATEGY_CONFIG = {
 
 # Strategy Directory for custom strategies (future use)
 STRATEGY_DIRECTORY = PROJECT_ROOT / "strategies"
-
-# NR7 (Narrowest Range) parameters
-NR7_LOOKBACK = 7  # Check last 7 days for narrowest range
-NR7_MIN_TREND_DAYS = 5  # Minimum uptrend days before NR7
 
 # Backtest parameters
 BACKTEST_LOOKBACK_YEARS = 2

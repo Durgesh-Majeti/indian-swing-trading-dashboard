@@ -62,26 +62,6 @@ class TradeAssistant:
         min_stop_loss = entry_price - max_stop_distance
         return max(stop_loss, min_stop_loss)
 
-    def calculate_target(
-        self, entry_price: float, stop_loss: float, risk_reward_ratio: float = config.RISK_REWARD_RATIO
-    ) -> float:
-        """
-        Calculate target price: Entry + (2.0 * Risk_Distance).
-        Legacy method for backward compatibility.
-
-        Args:
-            entry_price: Entry price
-            stop_loss: Stop loss price
-            risk_reward_ratio: Risk:Reward ratio (default: 2.0 for 1:2)
-
-        Returns:
-            Target price
-        """
-        risk_per_share = abs(entry_price - stop_loss)
-        reward_per_share = risk_per_share * risk_reward_ratio
-        target = entry_price + reward_per_share
-        return target
-
     def calculate_dynamic_target(
         self,
         df: pd.DataFrame,
@@ -134,48 +114,27 @@ class TradeAssistant:
             except (IndexError, AttributeError):
                 current_atr = entry_price * 0.02  # Fallback: 2% of entry price
 
-        # Strategy A: Golden Pullback - Target = Recent Swing High
-        if "Golden Pullback" in strategy_name or "Pullback" in strategy_name:
+        # Current swing trading strategies use SwingRiskEngine for targets
+        # This method is kept for backward compatibility but strategies should use SwingRiskEngine
+        # Default: Use ATR-based target for all strategies
+        if "Institutional Wave" in strategy_name or "Golden Pocket" in strategy_name:
+            # Support strategies: Target = Recent Swing High or Entry + 2*ATR
             swing_high_period = 20
             if len(df) >= swing_high_period:
                 recent_high = df["high"].iloc[-swing_high_period:].max()
-                target = recent_high
-                logger.debug(f"Pullback strategy: Target = Swing High = {target:.2f}")
+                target = max(recent_high, entry_price + (2.0 * current_atr))
+                logger.debug(f"Support strategy: Target = {target:.2f}")
             else:
-                # Fallback: Entry + 2 * ATR
                 target = entry_price + (2.0 * current_atr)
-                logger.debug(f"Pullback strategy: Insufficient data, using ATR fallback = {target:.2f}")
-
-        # Strategy B: Volatility Squeeze - Target = Entry + (2.0 * ATR)
-        elif "Volatility Squeeze" in strategy_name or "Squeeze" in strategy_name:
+                logger.debug(f"Support strategy: Using ATR fallback = {target:.2f}")
+        elif "Coil Breakout" in strategy_name or "Darvas Box" in strategy_name:
+            # Breakout strategies: Target = Entry + 2*ATR
             target = entry_price + (2.0 * current_atr)
             logger.debug(f"Breakout strategy: Target = Entry + 2*ATR = {target:.2f}")
-
-        # Strategy C: RSI Reversal - Target = 50 EMA
-        elif "RSI Reversal" in strategy_name or "Reversal" in strategy_name:
-            ema_50 = ta.ema(df["close"], length=50)
-            if not ema_50.empty and not pd.isna(ema_50.iloc[-1]):
-                target = ema_50.iloc[-1]
-                # Ensure target is above entry (mean reversion should move up)
-                if target <= entry_price:
-                    target = entry_price + (1.5 * current_atr)  # Fallback if EMA below entry
-                logger.debug(f"Reversion strategy: Target = 50 EMA = {target:.2f}")
-            else:
-                # Fallback: Entry + 1.5 * ATR
-                target = entry_price + (1.5 * current_atr)
-                logger.debug(f"Reversion strategy: EMA unavailable, using ATR fallback = {target:.2f}")
-
-        # Strategy D: SuperTrend Flow - Target = Entry + (3.0 * ATR)
-        elif "SuperTrend" in strategy_name or "Trend Flow" in strategy_name:
-            target = entry_price + (3.0 * current_atr)
-            logger.debug(f"Trend Flow strategy: Target = Entry + 3*ATR = {target:.2f}")
-
-        # Strategy E: NR7 Explosion - Target = Entry + (2.0 * ATR) (Breakout logic)
-        elif "NR7" in strategy_name or "Explosion" in strategy_name:
-            target = entry_price + (2.0 * current_atr)
-            logger.debug(f"NR7 strategy: Target = Entry + 2*ATR = {target:.2f}")
-
-        # Default: Use fixed ratio as fallback
+        elif "Weekly Climber" in strategy_name or "MACD Zero" in strategy_name:
+            # Momentum strategies: Target = Entry + 2.5*ATR
+            target = entry_price + (2.5 * current_atr)
+            logger.debug(f"Momentum strategy: Target = Entry + 2.5*ATR = {target:.2f}")
         else:
             logger.warning(f"Unknown strategy '{strategy_name}', using fixed ratio target")
             target = entry_price * 1.05  # 5% default

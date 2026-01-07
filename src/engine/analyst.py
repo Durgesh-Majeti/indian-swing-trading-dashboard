@@ -424,10 +424,10 @@ class IntelligenceEngine:
         # Create ticket with updated metadata
         ticket_with_metadata = TradeTicket(**ticket_data)
 
-        # Create signal (quality score will be calculated by QuantMath in app.py)
+        # Create signal with quality score
         return self.trade_assistant.ticket_to_signal(
             ticket=ticket_with_metadata,
-            quality_score=0.0,  # Placeholder - QuantMath will calculate the real score
+            quality_score=0.0,  # Quality score is set by swing_score calculation
             company_name=company_name,
         )
 

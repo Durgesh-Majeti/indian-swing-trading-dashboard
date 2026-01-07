@@ -4,6 +4,7 @@ import logging
 import sqlite3
 import time
 import json
+import os
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, date
@@ -17,6 +18,15 @@ import config
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Try to import PostgreSQL support (optional - for Streamlit Cloud persistence)
+try:
+    import psycopg2
+    from psycopg2.extras import execute_values
+    POSTGRES_AVAILABLE = True
+except ImportError:
+    POSTGRES_AVAILABLE = False
+    logger.info("PostgreSQL support not available (psycopg2 not installed). Using SQLite only.")
+
 
 class FastDataEngine:
     """High-performance data engine with parallel fetching and intelligent caching."""
@@ -26,31 +36,59 @@ class FastDataEngine:
         Initialize fast data engine.
 
         Args:
-            db_path: Path to SQLite database
+            db_path: Path to SQLite database (ignored if PostgreSQL is configured)
             max_workers: Maximum threads for parallel fetching
         """
         self.db_path = db_path or str(config.DB_PATH)
         self.max_workers = max_workers
         self._company_names_cache: Dict[str, str] = {}  # In-memory cache (backup)
+        
+        # Check for PostgreSQL connection from Streamlit secrets
+        self.use_postgres = False
+        self.postgres_url = None
+        
+        if POSTGRES_AVAILABLE:
+            try:
+                import streamlit as st
+                if hasattr(st, 'secrets') and st.secrets:
+                    db_secrets = st.secrets.get("database", {})
+                    self.postgres_url = db_secrets.get("postgres_url") or db_secrets.get("url")
+                    if self.postgres_url:
+                        self.use_postgres = True
+                        logger.info("PostgreSQL connection detected from Streamlit secrets. Using PostgreSQL for persistent storage.")
+            except Exception as e:
+                logger.debug(f"Could not access Streamlit secrets: {e}. Using SQLite.")
+        
         self._init_database()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    def _get_connection(self):
         """
-        Get database connection with proper settings for concurrent access.
+        Get database connection (SQLite or PostgreSQL).
         
         Returns:
-            SQLite connection with WAL mode enabled
+            Database connection object
         """
-        conn = sqlite3.connect(
-            self.db_path,
-            timeout=30.0,  # Wait up to 30s for lock
-            check_same_thread=False  # Allow multi-threaded access
-        )
-        # Enable WAL mode for better concurrency
-        conn.execute("PRAGMA journal_mode=WAL")
-        # Enable foreign keys (for future use)
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        if self.use_postgres and self.postgres_url:
+            if not POSTGRES_AVAILABLE:
+                raise RuntimeError("PostgreSQL URL configured but psycopg2 not available")
+            conn = psycopg2.connect(self.postgres_url)
+            conn.autocommit = False  # Use transactions
+            return conn
+        else:
+            # SQLite connection
+            conn = sqlite3.connect(
+                self.db_path,
+                timeout=30.0,  # Wait up to 30s for lock
+                check_same_thread=False  # Allow multi-threaded access
+            )
+            # Enable WAL mode for better concurrency (SQLite only)
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                # Enable foreign keys (for future use)
+                conn.execute("PRAGMA foreign_keys=ON")
+            except Exception:
+                pass  # Ignore if PRAGMA fails
+            return conn
 
     @contextmanager
     def _db_connection(self):
@@ -67,30 +105,86 @@ class FastDataEngine:
         finally:
             conn.close()
 
+    def _get_placeholder(self) -> str:
+        """Get SQL placeholder for current database type."""
+        return "%s" if self.use_postgres else "?"
+    
+    def _get_upsert_sql(self, table: str, columns: List[str], conflict_cols: List[str]) -> str:
+        """
+        Get UPSERT SQL statement compatible with both SQLite and PostgreSQL.
+        
+        Args:
+            table: Table name
+            columns: List of column names
+            conflict_cols: List of columns that define the conflict (for UNIQUE constraint)
+            
+        Returns:
+            SQL UPSERT statement
+        """
+        placeholder = self._get_placeholder()
+        cols_str = ", ".join(columns)
+        values_str = ", ".join([placeholder] * len(columns))
+        conflict_str = ", ".join(conflict_cols)
+        
+        if self.use_postgres:
+            # PostgreSQL: INSERT ... ON CONFLICT ... DO UPDATE
+            update_cols = ", ".join([f"{col} = EXCLUDED.{col}" for col in columns if col not in conflict_cols])
+            return f"""
+                INSERT INTO {table} ({cols_str})
+                VALUES ({values_str})
+                ON CONFLICT ({conflict_str}) DO UPDATE SET {update_cols}
+            """
+        else:
+            # SQLite: INSERT OR REPLACE
+            return f"""
+                INSERT OR REPLACE INTO {table} ({cols_str})
+                VALUES ({values_str})
+            """
+    
     def _init_database(self) -> None:
         """Initialize database tables with integrity constraints."""
         with self._db_connection() as conn:
             cursor = conn.cursor()
             
             # OHLCV Data table with enhanced constraints
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS ohlcv_data (
-                    ticker TEXT NOT NULL,
-                    date DATE NOT NULL,
-                    open REAL NOT NULL CHECK(open > 0),
-                    high REAL NOT NULL CHECK(high > 0),
-                    low REAL NOT NULL CHECK(low > 0),
-                    close REAL NOT NULL CHECK(close > 0),
-                    volume INTEGER NOT NULL CHECK(volume >= 0),
-                    last_updated TIMESTAMP NOT NULL,
-                    PRIMARY KEY (ticker, date),
-                    CHECK(high >= low),
-                    CHECK(high >= open),
-                    CHECK(high >= close),
-                    CHECK(low <= open),
-                    CHECK(low <= close)
-                )
-            """)
+            if self.use_postgres:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS ohlcv_data (
+                        ticker TEXT NOT NULL,
+                        date DATE NOT NULL,
+                        open DOUBLE PRECISION NOT NULL CHECK(open > 0),
+                        high DOUBLE PRECISION NOT NULL CHECK(high > 0),
+                        low DOUBLE PRECISION NOT NULL CHECK(low > 0),
+                        close DOUBLE PRECISION NOT NULL CHECK(close > 0),
+                        volume INTEGER NOT NULL CHECK(volume >= 0),
+                        last_updated TIMESTAMP NOT NULL,
+                        PRIMARY KEY (ticker, date),
+                        CHECK(high >= low),
+                        CHECK(high >= open),
+                        CHECK(high >= close),
+                        CHECK(low <= open),
+                        CHECK(low <= close)
+                    )
+                """)
+            else:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS ohlcv_data (
+                        ticker TEXT NOT NULL,
+                        date DATE NOT NULL,
+                        open REAL NOT NULL CHECK(open > 0),
+                        high REAL NOT NULL CHECK(high > 0),
+                        low REAL NOT NULL CHECK(low > 0),
+                        close REAL NOT NULL CHECK(close > 0),
+                        volume INTEGER NOT NULL CHECK(volume >= 0),
+                        last_updated TIMESTAMP NOT NULL,
+                        PRIMARY KEY (ticker, date),
+                        CHECK(high >= low),
+                        CHECK(high >= open),
+                        CHECK(high >= close),
+                        CHECK(low <= open),
+                        CHECK(low <= close)
+                    )
+                """)
             
             # Company Names table
             cursor.execute("""
@@ -109,6 +203,32 @@ class FastDataEngine:
                     last_updated TIMESTAMP NOT NULL
                 )
             """)
+            
+            # Strategy Results table - stores computed trade signals
+            if self.use_postgres:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS strategy_results (
+                        id BIGSERIAL PRIMARY KEY,
+                        ticker TEXT NOT NULL,
+                        regime TEXT NOT NULL,
+                        signals_json TEXT NOT NULL,
+                        data_hash TEXT NOT NULL,
+                        last_updated TIMESTAMP NOT NULL,
+                        UNIQUE(ticker, regime, data_hash)
+                    )
+                """)
+            else:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS strategy_results (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ticker TEXT NOT NULL,
+                        regime TEXT NOT NULL,
+                        signals_json TEXT NOT NULL,
+                        data_hash TEXT NOT NULL,
+                        last_updated TIMESTAMP NOT NULL,
+                        UNIQUE(ticker, regime, data_hash)
+                    )
+                """)
             
             # Indexes for performance
             cursor.execute("""
@@ -131,6 +251,16 @@ class FastDataEngine:
                 ON market_intelligence(last_updated)
             """)
             
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_strategy_results_ticker_regime 
+                ON strategy_results(ticker, regime)
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_strategy_results_updated 
+                ON strategy_results(last_updated)
+            """)
+            
             conn.commit()
 
     def _load_company_name(self, ticker: str) -> Optional[str]:
@@ -146,9 +276,10 @@ class FastDataEngine:
         try:
             with self._db_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("""
+                placeholder = self._get_placeholder()
+                cursor.execute(f"""
                     SELECT company_name FROM company_names
-                    WHERE ticker = ?
+                    WHERE ticker = {placeholder}
                 """, (ticker,))
                 result = cursor.fetchone()
                 if result:
@@ -168,13 +299,26 @@ class FastDataEngine:
         try:
             with self._db_connection() as conn:
                 try:
-                    conn.execute("BEGIN TRANSACTION")
+                    if not self.use_postgres:
+                        if not self.use_postgres:
+                        conn.execute("BEGIN TRANSACTION")
                     cursor = conn.cursor()
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO company_names
-                        (ticker, company_name, last_updated)
-                        VALUES (?, ?, ?)
-                    """, (ticker, company_name, datetime.now().isoformat()))
+                    placeholder = self._get_placeholder()
+                    if self.use_postgres:
+                        cursor.execute(f"""
+                            INSERT INTO company_names
+                            (ticker, company_name, last_updated)
+                            VALUES ({placeholder}, {placeholder}, {placeholder})
+                            ON CONFLICT (ticker) DO UPDATE SET
+                            company_name = EXCLUDED.company_name,
+                            last_updated = EXCLUDED.last_updated
+                        """, (ticker, company_name, datetime.now().isoformat()))
+                    else:
+                        cursor.execute(f"""
+                            INSERT OR REPLACE INTO company_names
+                            (ticker, company_name, last_updated)
+                            VALUES ({placeholder}, {placeholder}, {placeholder})
+                        """, (ticker, company_name, datetime.now().isoformat()))
                     conn.commit()
                 except Exception as e:
                     conn.rollback()
@@ -332,10 +476,11 @@ class FastDataEngine:
         try:
             with self._db_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("""
+                placeholder = self._get_placeholder()
+                cursor.execute(f"""
                     SELECT MIN(date) as min_date, MAX(date) as max_date
                     FROM ohlcv_data
-                    WHERE ticker = ?
+                    WHERE ticker = {placeholder}
                 """, (ticker,))
                 result = cursor.fetchone()
                 if result and result[0]:
@@ -359,10 +504,11 @@ class FastDataEngine:
         try:
             with self._db_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("""
+                placeholder = self._get_placeholder()
+                cursor.execute(f"""
                     SELECT MAX(last_updated) 
                     FROM ohlcv_data 
-                    WHERE ticker = ?
+                    WHERE ticker = {placeholder}
                 """, (ticker,))
                 
                 result = cursor.fetchone()
@@ -425,20 +571,44 @@ class FastDataEngine:
                 elif not isinstance(row_date, date):
                     row_date = pd.to_datetime(row_date).date()
                 
-                cursor.execute("""
-                    INSERT OR REPLACE INTO ohlcv_data 
-                    (ticker, date, open, high, low, close, volume, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    ticker,
-                    str(row_date),
-                    float(row['open']),
-                    float(row['high']),
-                    float(row['low']),
-                    float(row['close']),
-                    int(row['volume']),
-                    current_time
-                ))
+                placeholder = self._get_placeholder()
+                if self.use_postgres:
+                    cursor.execute(f"""
+                        INSERT INTO ohlcv_data 
+                        (ticker, date, open, high, low, close, volume, last_updated)
+                        VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+                        ON CONFLICT (ticker, date) DO UPDATE SET
+                        open = EXCLUDED.open,
+                        high = EXCLUDED.high,
+                        low = EXCLUDED.low,
+                        close = EXCLUDED.close,
+                        volume = EXCLUDED.volume,
+                        last_updated = EXCLUDED.last_updated
+                    """, (
+                        ticker,
+                        str(row_date),
+                        float(row['open']),
+                        float(row['high']),
+                        float(row['low']),
+                        float(row['close']),
+                        int(row['volume']),
+                        current_time
+                    ))
+                else:
+                    cursor.execute(f"""
+                        INSERT OR REPLACE INTO ohlcv_data 
+                        (ticker, date, open, high, low, close, volume, last_updated)
+                        VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+                    """, (
+                        ticker,
+                        str(row_date),
+                        float(row['open']),
+                        float(row['high']),
+                        float(row['low']),
+                        float(row['close']),
+                        int(row['volume']),
+                        current_time
+                    ))
             except Exception as e:
                 logger.error(f"Error upserting row for {ticker}: {e}")
                 continue
@@ -459,7 +629,8 @@ class FastDataEngine:
         try:
             with self._db_connection() as conn:
                 try:
-                    conn.execute("BEGIN TRANSACTION")
+                    if not self.use_postgres:
+                        conn.execute("BEGIN TRANSACTION")
                     self._upsert_ohlcv_data(conn, ticker, df)
                     conn.commit()
                     logger.debug(f"Cached {len(df)} rows for {ticker}")
@@ -477,10 +648,11 @@ class FastDataEngine:
                 period_days = self._period_to_days(period)
                 cutoff_date = datetime.now().date() - timedelta(days=period_days)
                 
-                query = """
+                placeholder = self._get_placeholder()
+                query = f"""
                     SELECT date, open, high, low, close, volume
                     FROM ohlcv_data
-                    WHERE ticker = ? AND date >= ?
+                    WHERE ticker = {placeholder} AND date >= {placeholder}
                     ORDER BY date ASC
                 """
                 
@@ -1011,17 +1183,34 @@ class FastDataEngine:
         try:
             with self._db_connection() as conn:
                 try:
-                    conn.execute("BEGIN TRANSACTION")
+                    if not self.use_postgres:
+                        if not self.use_postgres:
+                        conn.execute("BEGIN TRANSACTION")
                     cursor = conn.cursor()
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO market_intelligence
-                        (symbol, data_json, last_updated)
-                        VALUES (?, ?, ?)
-                    """, (
-                        symbol,
-                        json.dumps(data),
-                        datetime.now().isoformat()
-                    ))
+                    placeholder = self._get_placeholder()
+                    if self.use_postgres:
+                        cursor.execute(f"""
+                            INSERT INTO market_intelligence
+                            (symbol, data_json, last_updated)
+                            VALUES ({placeholder}, {placeholder}, {placeholder})
+                            ON CONFLICT (symbol) DO UPDATE SET
+                            data_json = EXCLUDED.data_json,
+                            last_updated = EXCLUDED.last_updated
+                        """, (
+                            symbol,
+                            json.dumps(data),
+                            datetime.now().isoformat()
+                        ))
+                    else:
+                        cursor.execute(f"""
+                            INSERT OR REPLACE INTO market_intelligence
+                            (symbol, data_json, last_updated)
+                            VALUES ({placeholder}, {placeholder}, {placeholder})
+                        """, (
+                            symbol,
+                            json.dumps(data),
+                            datetime.now().isoformat()
+                        ))
                     conn.commit()
                     logger.debug(f"Saved market intelligence for {symbol}")
                 except Exception as e:
@@ -1045,10 +1234,11 @@ class FastDataEngine:
         try:
             with self._db_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("""
+                placeholder = self._get_placeholder()
+                cursor.execute(f"""
                     SELECT data_json, last_updated
                     FROM market_intelligence
-                    WHERE symbol = ?
+                    WHERE symbol = {placeholder}
                 """, (symbol,))
                 result = cursor.fetchone()
                 
@@ -1066,6 +1256,202 @@ class FastDataEngine:
         except Exception as e:
             logger.debug(f"Error loading market intelligence for {symbol}: {e}")
         return None
+
+    def get_last_update_date(self) -> Optional[datetime]:
+        """
+        Get the most recent last_updated timestamp from the database.
+        
+        Returns:
+            datetime object of the most recent update, or None if no data exists
+        """
+        try:
+            with self._db_connection() as conn:
+                cursor = conn.cursor()
+                # Get the most recent update from OHLCV data
+                cursor.execute("""
+                    SELECT MAX(last_updated) 
+                    FROM ohlcv_data
+                """)
+                result = cursor.fetchone()
+                
+                if result and result[0]:
+                    return datetime.fromisoformat(result[0])
+        except Exception as e:
+            logger.debug(f"Error getting last update date: {e}")
+        
+        return None
+
+    def _calculate_data_hash(self, ticker: str, df: pd.DataFrame) -> str:
+        """
+        Calculate a hash of the data to detect changes.
+        
+        Args:
+            ticker: Stock ticker
+            df: DataFrame with OHLCV data
+            
+        Returns:
+            Hash string representing the data state
+        """
+        import hashlib
+        # Use last date and last close price as hash components
+        if df.empty:
+            return hashlib.md5(f"{ticker}_empty".encode()).hexdigest()
+        
+        last_row = df.iloc[-1]
+        hash_str = f"{ticker}_{df.index[-1]}_{last_row['close']:.2f}_{len(df)}"
+        return hashlib.md5(hash_str.encode()).hexdigest()
+
+    def save_strategy_results(
+        self, 
+        ticker: str, 
+        regime: str, 
+        signals: List[Dict], 
+        data_hash: str
+    ) -> None:
+        """
+        Save strategy results (trade signals) to database cache.
+        
+        Args:
+            ticker: Stock ticker symbol
+            regime: Market regime ("AGGRESSIVE", "DEFENSIVE", "CASH_PROTECTION")
+            signals: List of signal dictionaries (from TradeSignal.model_dump())
+            data_hash: Hash of the input data to detect changes
+        """
+        try:
+            with self._db_connection() as conn:
+                try:
+                    if not self.use_postgres:
+                        if not self.use_postgres:
+                        conn.execute("BEGIN TRANSACTION")
+                    cursor = conn.cursor()
+                    placeholder = self._get_placeholder()
+                    if self.use_postgres:
+                        cursor.execute(f"""
+                            INSERT INTO strategy_results
+                            (ticker, regime, signals_json, data_hash, last_updated)
+                            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+                            ON CONFLICT (ticker, regime, data_hash) DO UPDATE SET
+                            signals_json = EXCLUDED.signals_json,
+                            last_updated = EXCLUDED.last_updated
+                        """, (
+                            ticker,
+                            regime,
+                            json.dumps(signals),
+                            data_hash,
+                            datetime.now().isoformat()
+                        ))
+                    else:
+                        cursor.execute(f"""
+                            INSERT OR REPLACE INTO strategy_results
+                            (ticker, regime, signals_json, data_hash, last_updated)
+                            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, {placeholder})
+                        """, (
+                            ticker,
+                            regime,
+                            json.dumps(signals),
+                            data_hash,
+                            datetime.now().isoformat()
+                        ))
+                    conn.commit()
+                    logger.debug(f"Saved strategy results for {ticker} ({regime})")
+                except Exception as e:
+                    conn.rollback()
+                    logger.error(f"Failed to save strategy results for {ticker}: {e}")
+                    raise
+        except Exception as e:
+            logger.error(f"Error saving strategy results for {ticker}: {e}")
+
+    def load_strategy_results(
+        self, 
+        ticker: str, 
+        regime: str, 
+        data_hash: str,
+        max_age_hours: int = 24
+    ) -> Optional[List[Dict]]:
+        """
+        Load strategy results from database cache if they match current data.
+        
+        Args:
+            ticker: Stock ticker symbol
+            regime: Market regime
+            data_hash: Hash of current data to verify cache validity
+            max_age_hours: Maximum age in hours before considering stale (default: 24 hours)
+            
+        Returns:
+            List of signal dictionaries if cache is valid, None otherwise
+        """
+        try:
+            with self._db_connection() as conn:
+                cursor = conn.cursor()
+                placeholder = self._get_placeholder()
+                cursor.execute(f"""
+                    SELECT signals_json, data_hash, last_updated
+                    FROM strategy_results
+                    WHERE ticker = {placeholder} AND regime = {placeholder}
+                    ORDER BY last_updated DESC
+                    LIMIT 1
+                """, (ticker, regime))
+                result = cursor.fetchone()
+                
+                if result:
+                    signals_json, cached_hash, last_updated_str = result
+                    last_updated = datetime.fromisoformat(last_updated_str)
+                    age = datetime.now() - last_updated
+                    
+                    # Check if data hash matches (data hasn't changed)
+                    if cached_hash == data_hash and age < timedelta(hours=max_age_hours):
+                        logger.debug(f"Loaded strategy results for {ticker} ({regime}) from cache")
+                        return json.loads(signals_json)
+                    else:
+                        if cached_hash != data_hash:
+                            logger.debug(f"Strategy cache for {ticker} invalidated (data changed)")
+                            # Auto-delete stale cache entry
+                            placeholder = self._get_placeholder()
+                            cursor.execute(f"""
+                                DELETE FROM strategy_results
+                                WHERE ticker = {placeholder} AND regime = {placeholder} AND data_hash = {placeholder}
+                            """, (ticker, regime, cached_hash))
+                            conn.commit()
+                        else:
+                            logger.debug(f"Strategy cache for {ticker} is stale ({age})")
+                        return None
+        except Exception as e:
+            logger.debug(f"Error loading strategy results for {ticker}: {e}")
+        return None
+
+    def clear_strategy_cache(self, ticker: Optional[str] = None, regime: Optional[str] = None) -> None:
+        """
+        Clear strategy results cache.
+        
+        Args:
+            ticker: Optional ticker to clear (if None, clears all)
+            regime: Optional regime to clear (if None, clears all)
+        """
+        try:
+            with self._db_connection() as conn:
+                cursor = conn.cursor()
+                placeholder = self._get_placeholder()
+                if ticker and regime:
+                    cursor.execute(f"""
+                        DELETE FROM strategy_results
+                        WHERE ticker = {placeholder} AND regime = {placeholder}
+                    """, (ticker, regime))
+                elif ticker:
+                    cursor.execute(f"""
+                        DELETE FROM strategy_results
+                        WHERE ticker = {placeholder}
+                    """, (ticker,))
+                elif regime:
+                    cursor.execute(f"""
+                        DELETE FROM strategy_results
+                        WHERE regime = {placeholder}
+                    """, (regime,))
+                else:
+                    cursor.execute("DELETE FROM strategy_results")
+                conn.commit()
+                logger.info(f"Cleared strategy cache for ticker={ticker}, regime={regime}")
+        except Exception as e:
+            logger.error(f"Error clearing strategy cache: {e}")
 
     def load_nifty_500_tickers(self, csv_path: str | None = None) -> List[str]:
         """
