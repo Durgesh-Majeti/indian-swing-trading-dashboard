@@ -313,7 +313,6 @@ class FastDataEngine:
             with self._db_connection() as conn:
                 try:
                     if not self.use_postgres:
-                        if not self.use_postgres:
                         conn.execute("BEGIN TRANSACTION")
                     cursor = conn.cursor()
                     placeholder = self._get_placeholder()
