@@ -100,11 +100,17 @@ class IntelligenceEngine:
             runner = StrategyRunner(self.data_engine, self.trade_assistant)
             
             # Get the actual strategy from registry
+            # get_all_strategies() returns a dict, so iterate over values
             strategy = None
-            for s in runner.registry.get_all_strategies():
-                if s.get_name() == strategy_name:
-                    strategy = s
-                    break
+            all_strategies = runner.registry.get_all_strategies()
+            for s in all_strategies.values():
+                if hasattr(s, 'get_name'):
+                    try:
+                        if s.get_name() == strategy_name:
+                            strategy = s
+                            break
+                    except Exception:
+                        continue
             
             if not strategy:
                 logger.warning(f"Strategy {strategy_name} not found for {ticker}")

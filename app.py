@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from typing import List, Dict
+from datetime import datetime
 import pandas_ta as ta
 import logging
 
@@ -1151,7 +1152,8 @@ def main():
                             
                             # Save to cache
                             if ticker_signals:
-                                signals_dict = [sig.model_dump() for sig in ticker_signals]
+                                # Convert signals to dict with datetime serialization
+                                signals_dict = [serialize_signal_for_json(sig) for sig in ticker_signals]
                                 st.session_state.data_engine.save_strategy_results(
                                     ticker, regime, signals_dict, data_hash
                                 )
@@ -1270,7 +1272,8 @@ def main():
                         
                         # Save to cache
                         if ticker_signals:
-                            signals_dict = [sig.model_dump() for sig in ticker_signals]
+                            # Convert signals to dict with datetime serialization
+                            signals_dict = [serialize_signal_for_json(sig) for sig in ticker_signals]
                             st.session_state.data_engine.save_strategy_results(
                                 ticker, regime, signals_dict, data_hash
                             )
